@@ -15,8 +15,26 @@ function resolveCsvPath() {
   return path.resolve(process.cwd(), configuredPath);
 }
 
+function buildTimestampedCsvPath() {
+  const basePath = resolveCsvPath();
+  const directory = path.dirname(basePath);
+  const extension = path.extname(basePath) || '.csv';
+  const baseName = path.basename(basePath, extension);
+  const now = new Date();
+  const year = String(now.getFullYear());
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hours24 = now.getHours();
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const meridiem = hours24 >= 12 ? 'pm' : 'am';
+  const hours12 = String(((hours24 + 11) % 12) + 1).padStart(2, '0');
+  const timestamp = `${year}-${month}-${day}_${hours12}-${minutes}${meridiem}`;
+
+  return path.join(directory, `${baseName}_${timestamp}${extension}`);
+}
+
 async function exportToCsv(results) {
-  const csvPath = resolveCsvPath();
+  const csvPath = buildTimestampedCsvPath();
   fs.mkdirSync(path.dirname(csvPath), { recursive: true });
 
   const writer = createObjectCsvWriter({
@@ -40,10 +58,6 @@ async function exportToCsv(results) {
 async function loadPuppeteer() {
   const module = await import('puppeteer');
   return module.default ?? module;
-}
-
-function escapeForDoubleQuotedAttribute(value) {
-  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function extractFirstEmail(value) {
@@ -109,13 +123,15 @@ async function scrapeEmailFromWebsite(browser, websiteUrl) {
 
 async function collectListingUrls(page, maxResults) {
   const resultsPanel = await page.$('[role="feed"]');
+  let previousCount = 0;
+  let staleRounds = 0;
 
-  for (let i = 0; i < 10; i += 1) {
+  for (let i = 0; i < 20; i += 1) {
     if (!resultsPanel) {
       break;
     }
 
-    updateScrapeState({ message: `Loading map results (${i + 1}/10)` });
+    updateScrapeState({ message: `Loading map results (${i + 1}/20)` });
     await page.evaluate((panel) => panel.scrollBy(0, 1200), resultsPanel);
     await delay(1200 + Math.floor(Math.random() * 800));
 
@@ -126,6 +142,16 @@ async function collectListingUrls(page, maxResults) {
     if (count >= maxResults) {
       break;
     }
+
+    if (count === previousCount) {
+      staleRounds += 1;
+      if (staleRounds >= 3) {
+        break;
+      }
+    } else {
+      staleRounds = 0;
+    }
+    previousCount = count;
   }
 
   const urls = await page.$$eval('a[href*="/maps/place/"]', (nodes) => {
@@ -135,41 +161,34 @@ async function collectListingUrls(page, maxResults) {
   return urls.slice(0, maxResults);
 }
 
-async function openListingDetails(page, listingUrl) {
-  const escapedUrl = escapeForDoubleQuotedAttribute(listingUrl);
-  const selector = `a[href="${escapedUrl}"]`;
+async function extractListingData(browser, listingUrl) {
+  const detailPage = await browser.newPage();
+  await detailPage.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+  );
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      await page.waitForSelector('[role="feed"]', { timeout: 10000 });
-      const link = await page.$(selector);
+  try {
+    await detailPage.goto(listingUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await detailPage.waitForSelector('h1', { timeout: 12000 });
+    await delay(1800 + Math.floor(Math.random() * 1200));
 
-      if (!link) {
-        const visibleLinks = await collectListingUrls(page, attempt + 5);
-        if (!visibleLinks.includes(listingUrl)) {
-          const resultsPanel = await page.$('[role="feed"]');
-          if (resultsPanel) {
-            await page.evaluate((panel) => panel.scrollBy(0, 1400), resultsPanel);
-            await delay(900);
-          }
-        }
-        continue;
-      }
+    const data = await detailPage.evaluate(() => ({
+      name: document.querySelector('h1')?.textContent?.trim() || '',
+      address:
+        document.querySelector('[data-item-id="address"]')?.textContent?.trim() || '',
+      phone:
+        document.querySelector('[data-item-id*="phone"]')?.textContent?.trim() || '',
+      website:
+        document.querySelector('[data-item-id="authority"] a')?.href?.trim() || '',
+      rating:
+        document.querySelector('[role="img"][aria-label*="stars"]')?.getAttribute('aria-label') ||
+        ''
+    }));
 
-      await link.evaluate((node) => {
-        node.scrollIntoView({ block: 'center', behavior: 'instant' });
-      });
-      await delay(300);
-      await link.click();
-      await page.waitForSelector('h1', { timeout: 10000 });
-      await delay(1500 + Math.floor(Math.random() * 1000));
-      return true;
-    } catch {
-      await delay(800);
-    }
+    return data;
+  } finally {
+    await detailPage.close();
   }
-
-  return false;
 }
 
 export async function scrapeGoogleMaps(query, maxResults = 20) {
@@ -202,6 +221,11 @@ export async function scrapeGoogleMaps(query, maxResults = 20) {
 
     await page.waitForSelector('[role="feed"]', { timeout: 15000 });
     const listingUrls = await collectListingUrls(page, maxResults);
+    updateScrapeState({
+      total: listingUrls.length,
+      message: `Collected ${listingUrls.length} listing URLs`
+    });
+
     const results = [];
 
     for (let index = 0; index < listingUrls.length; index += 1) {
@@ -211,23 +235,12 @@ export async function scrapeGoogleMaps(query, maxResults = 20) {
         processed: index
       });
 
-      const opened = await openListingDetails(page, listingUrl);
-      if (!opened) {
+      let data;
+      try {
+        data = await extractListingData(browser, listingUrl);
+      } catch {
         continue;
       }
-
-      const data = await page.evaluate(() => ({
-        name: document.querySelector('h1')?.textContent?.trim() || '',
-        address:
-          document.querySelector('[data-item-id="address"]')?.textContent?.trim() || '',
-        phone:
-          document.querySelector('[data-item-id*="phone"]')?.textContent?.trim() || '',
-        website:
-          document.querySelector('[data-item-id="authority"] a')?.href?.trim() || '',
-        rating:
-          document.querySelector('[role="img"][aria-label*="stars"]')?.getAttribute('aria-label') ||
-          ''
-      }));
 
       const email = data.website ? await scrapeEmailFromWebsite(browser, data.website) : '';
 
