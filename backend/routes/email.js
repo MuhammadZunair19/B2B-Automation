@@ -6,6 +6,19 @@ import { renderTemplate } from '../email/templates.js';
 
 const router = express.Router();
 
+function statusForTemplate(templateKey) {
+  if (templateKey === 'warmup1') {
+    return 'warmup_1';
+  }
+  if (templateKey === 'warmup2') {
+    return 'warmup_2';
+  }
+  if (templateKey === 'permission') {
+    return 'permission_sent';
+  }
+  return null;
+}
+
 router.post('/send', async (req, res) => {
   const db = getDatabase();
   const { contactId, templateKey, subject, html, text, to } = req.body;
@@ -48,6 +61,11 @@ router.post('/send', async (req, res) => {
         payload.text || '',
         info.messageId || ''
       );
+
+      const nextStatus = statusForTemplate(templateKey);
+      if (nextStatus) {
+        db.prepare(`UPDATE contacts SET status = ? WHERE id = ?`).run(nextStatus, contact.id);
+      }
     }
 
     res.json({ ok: true, messageId: info.messageId });

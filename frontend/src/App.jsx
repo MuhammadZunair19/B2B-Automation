@@ -63,8 +63,16 @@ export default function App() {
           selectedContactId={selectedContactId}
           onSelectContact={setSelectedContactId}
         />
-        <SequenceStatus contact={selectedContact} />
-        <EmailComposer contact={selectedContact} apiBaseUrl={API_BASE_URL} />
+        <SequenceStatus
+          contact={selectedContact}
+          apiBaseUrl={API_BASE_URL}
+          onRefreshContacts={loadContacts}
+        />
+        <EmailComposer
+          contact={selectedContact}
+          apiBaseUrl={API_BASE_URL}
+          onRefreshContacts={loadContacts}
+        />
       </div>
     </main>
   );

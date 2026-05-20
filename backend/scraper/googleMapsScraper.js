@@ -3,6 +3,9 @@ import path from 'node:path';
 import { createObjectCsvWriter } from 'csv-writer';
 import { updateScrapeState } from './scrapeState.js';
 
+const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+const CONTACT_PATH_HINTS = ['contact', 'about', 'reach', 'support', 'menu'];
+
 async function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -37,6 +40,67 @@ async function exportToCsv(results) {
 async function loadPuppeteer() {
   const module = await import('puppeteer');
   return module.default ?? module;
+}
+
+function extractFirstEmail(value) {
+  const matches = String(value || '').match(EMAIL_REGEX) || [];
+  const filtered = matches.filter((entry) => !entry.includes('.png') && !entry.includes('.jpg'));
+  return filtered[0] || '';
+}
+
+async function scrapeEmailFromWebsite(browser, websiteUrl) {
+  const page = await browser.newPage();
+  await page.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+  );
+
+  try {
+    await page.goto(websiteUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+    const directEmail = await page.evaluate((emailRegexSource) => {
+      const emailRegex = new RegExp(emailRegexSource, 'g');
+      const bodyText = document.body?.innerText || '';
+      const bodyMatch = bodyText.match(emailRegex)?.[0];
+      if (bodyMatch) {
+        return bodyMatch;
+      }
+
+      const mailtoLink = Array.from(document.querySelectorAll('a[href^="mailto:"]'))[0];
+      return mailtoLink?.getAttribute('href') || '';
+    }, EMAIL_REGEX.source);
+
+    const firstEmail = extractFirstEmail(directEmail);
+    if (firstEmail) {
+      return firstEmail;
+    }
+
+    const contactLinks = await page.$$eval('a[href]', (links, pathHints) => {
+      return links
+        .map((link) => link.href)
+        .filter(Boolean)
+        .filter((href) => pathHints.some((hint) => href.toLowerCase().includes(hint)))
+        .slice(0, 5);
+    }, CONTACT_PATH_HINTS);
+
+    for (const link of contactLinks) {
+      try {
+        await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 10000 });
+        const text = await page.evaluate(() => document.body?.innerText || '');
+        const nestedEmail = extractFirstEmail(text);
+        if (nestedEmail) {
+          return nestedEmail;
+        }
+      } catch {
+        // Keep trying other likely contact pages.
+      }
+    }
+
+    return '';
+  } catch {
+    return '';
+  } finally {
+    await page.close();
+  }
 }
 
 export async function scrapeGoogleMaps(query, maxResults = 20) {
@@ -119,9 +183,11 @@ export async function scrapeGoogleMaps(query, maxResults = 20) {
           ''
       }));
 
+      const email = data.website ? await scrapeEmailFromWebsite(browser, data.website) : '';
+
       results.push({
         ...data,
-        email: '',
+        email,
         area: query,
         status: 'pending'
       });

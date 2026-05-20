@@ -52,6 +52,14 @@ export function initializeDatabase() {
       message_id TEXT DEFAULT '',
       FOREIGN KEY(contact_id) REFERENCES contacts(id)
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS contacts_unique_website
+    ON contacts(website)
+    WHERE website != '';
+
+    CREATE UNIQUE INDEX IF NOT EXISTS contacts_unique_email
+    ON contacts(email)
+    WHERE email != '';
   `);
 
   const updateTimestampTrigger = `
@@ -70,14 +78,46 @@ export function initializeDatabase() {
 
 export function upsertContacts(contacts) {
   const database = getDatabase();
+  const findByWebsite = database.prepare(`
+    SELECT *
+    FROM contacts
+    WHERE website = ?
+      AND website != ''
+  `);
+  const findByEmail = database.prepare(`
+    SELECT *
+    FROM contacts
+    WHERE email = ?
+      AND email != ''
+  `);
+  const findByNamePhone = database.prepare(`
+    SELECT *
+    FROM contacts
+    WHERE lower(name) = lower(?)
+      AND phone = ?
+      AND phone != ''
+  `);
   const insert = database.prepare(`
     INSERT INTO contacts (name, address, phone, email, website, rating, owner_name, area, status)
-    VALUES (@name, @address, @phone, @email, @website, @rating, @owner_name, @area, COALESCE(@status, 'pending'))
+    VALUES (@name, @address, @phone, @email, @website, @rating, @owner_name, @area, @status)
+  `);
+  const update = database.prepare(`
+    UPDATE contacts
+    SET name = @name,
+        address = @address,
+        phone = @phone,
+        email = @email,
+        website = @website,
+        rating = @rating,
+        owner_name = @owner_name,
+        area = @area,
+        status = @status
+    WHERE id = @id
   `);
 
   const transaction = database.transaction((rows) => {
     for (const row of rows) {
-      insert.run({
+      const nextRow = {
         name: row.name || 'Unknown',
         address: row.address || '',
         phone: row.phone || '',
@@ -87,7 +127,26 @@ export function upsertContacts(contacts) {
         owner_name: row.owner_name || '',
         area: row.area || '',
         status: row.status || 'pending'
-      });
+      };
+
+      const existing =
+        (nextRow.website ? findByWebsite.get(nextRow.website) : null) ||
+        (nextRow.email ? findByEmail.get(nextRow.email) : null) ||
+        (nextRow.phone ? findByNamePhone.get(nextRow.name, nextRow.phone) : null);
+
+      if (existing) {
+        update.run({
+          ...existing,
+          ...nextRow,
+          status: existing.status === 'replied' || existing.status === 'opted_out'
+            ? existing.status
+            : nextRow.status,
+          id: existing.id
+        });
+        continue;
+      }
+
+      insert.run(nextRow);
     }
   });
 

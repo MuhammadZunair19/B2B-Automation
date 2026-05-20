@@ -6,7 +6,7 @@ const templateOptions = [
   { value: 'permission', label: 'Permission Ask' }
 ];
 
-export function EmailComposer({ contact, apiBaseUrl }) {
+export function EmailComposer({ contact, apiBaseUrl, onRefreshContacts }) {
   const [templateKey, setTemplateKey] = useState('warmup1');
   const [feedback, setFeedback] = useState('');
 
@@ -34,6 +34,9 @@ export function EmailComposer({ contact, apiBaseUrl }) {
     }
 
     setFeedback(`Email sent. Message ID: ${payload.messageId}`);
+    if (onRefreshContacts) {
+      await onRefreshContacts();
+    }
   }
 
   return (
