@@ -42,6 +42,10 @@ async function loadPuppeteer() {
   return module.default ?? module;
 }
 
+function escapeForDoubleQuotedAttribute(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 function extractFirstEmail(value) {
   const matches = String(value || '').match(EMAIL_REGEX) || [];
   const filtered = matches.filter((entry) => !entry.includes('.png') && !entry.includes('.jpg'));
@@ -103,6 +107,71 @@ async function scrapeEmailFromWebsite(browser, websiteUrl) {
   }
 }
 
+async function collectListingUrls(page, maxResults) {
+  const resultsPanel = await page.$('[role="feed"]');
+
+  for (let i = 0; i < 10; i += 1) {
+    if (!resultsPanel) {
+      break;
+    }
+
+    updateScrapeState({ message: `Loading map results (${i + 1}/10)` });
+    await page.evaluate((panel) => panel.scrollBy(0, 1200), resultsPanel);
+    await delay(1200 + Math.floor(Math.random() * 800));
+
+    const count = await page.$$eval('a[href*="/maps/place/"]', (nodes) => {
+      return Array.from(new Set(nodes.map((node) => node.href).filter(Boolean))).length;
+    });
+
+    if (count >= maxResults) {
+      break;
+    }
+  }
+
+  const urls = await page.$$eval('a[href*="/maps/place/"]', (nodes) => {
+    return Array.from(new Set(nodes.map((node) => node.href).filter(Boolean)));
+  });
+
+  return urls.slice(0, maxResults);
+}
+
+async function openListingDetails(page, listingUrl) {
+  const escapedUrl = escapeForDoubleQuotedAttribute(listingUrl);
+  const selector = `a[href="${escapedUrl}"]`;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await page.waitForSelector('[role="feed"]', { timeout: 10000 });
+      const link = await page.$(selector);
+
+      if (!link) {
+        const visibleLinks = await collectListingUrls(page, attempt + 5);
+        if (!visibleLinks.includes(listingUrl)) {
+          const resultsPanel = await page.$('[role="feed"]');
+          if (resultsPanel) {
+            await page.evaluate((panel) => panel.scrollBy(0, 1400), resultsPanel);
+            await delay(900);
+          }
+        }
+        continue;
+      }
+
+      await link.evaluate((node) => {
+        node.scrollIntoView({ block: 'center', behavior: 'instant' });
+      });
+      await delay(300);
+      await link.click();
+      await page.waitForSelector('h1', { timeout: 10000 });
+      await delay(1500 + Math.floor(Math.random() * 1000));
+      return true;
+    } catch {
+      await delay(800);
+    }
+  }
+
+  return false;
+}
+
 export async function scrapeGoogleMaps(query, maxResults = 20) {
   updateScrapeState({
     active: true,
@@ -132,43 +201,20 @@ export async function scrapeGoogleMaps(query, maxResults = 20) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
     await page.waitForSelector('[role="feed"]', { timeout: 15000 });
-    const resultsPanel = await page.$('[role="feed"]');
-
-    for (let i = 0; i < 8; i += 1) {
-      if (!resultsPanel) {
-        break;
-      }
-
-      updateScrapeState({ message: `Loading map results (${i + 1}/8)` });
-      await page.evaluate((panel) => panel.scrollBy(0, 1000), resultsPanel);
-      await delay(1200 + Math.floor(Math.random() * 800));
-    }
-
-    const listings = await page.$$('a[href*="/maps/place/"]');
-    const dedupedListings = [];
-    const seen = new Set();
-
-    for (const listing of listings) {
-      const href = await listing.evaluate((node) => node.href);
-      if (href && !seen.has(href)) {
-        seen.add(href);
-        dedupedListings.push(listing);
-      }
-    }
-
+    const listingUrls = await collectListingUrls(page, maxResults);
     const results = [];
-    const slice = dedupedListings.slice(0, maxResults);
 
-    for (let index = 0; index < slice.length; index += 1) {
-      const listing = slice[index];
+    for (let index = 0; index < listingUrls.length; index += 1) {
+      const listingUrl = listingUrls[index];
       updateScrapeState({
-        message: `Processing listing ${index + 1} of ${slice.length}`,
+        message: `Processing listing ${index + 1} of ${listingUrls.length}`,
         processed: index
       });
 
-      await listing.click();
-      await page.waitForSelector('h1', { timeout: 10000 });
-      await delay(1800 + Math.floor(Math.random() * 1200));
+      const opened = await openListingDetails(page, listingUrl);
+      if (!opened) {
+        continue;
+      }
 
       const data = await page.evaluate(() => ({
         name: document.querySelector('h1')?.textContent?.trim() || '',
